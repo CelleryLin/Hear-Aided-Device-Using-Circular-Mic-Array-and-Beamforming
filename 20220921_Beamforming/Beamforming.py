@@ -32,9 +32,9 @@ FORMAT = pyaudio.paInt32
 CHANNELS = 8
 
 ELEMENT=6
-SOURCE=1
+SOURCE=3
 Radii=46.3e-3
-LDA=343/1000; #wavelength
+LDA=343/2000; #wavelength (440hz for v=343m/s)
 phi=np.radians(90)
 Angles = np.arange(0,360,1)
 Pmusic = np.zeros(len(Angles))
@@ -42,7 +42,7 @@ scanning_vectors=de.gen_uca_scanning_vectors(ELEMENT, Radii, Angles)
 
 CHUNK = 2**10
 RATE = 44100
-RESPEAKER_INDEX = 2
+RESPEAKER_INDEX = 1
 
 input_buffer=np.zeros([CHANNELS,CHUNK])
 
@@ -68,7 +68,6 @@ def MVDR(input_buffer,doa):
         
 
 def MU_Processing():
-    '''
     global input_buffer, doa
     #print(input_buffer)
     b=hilbert(input_buffer[0:ELEMENT])
@@ -81,9 +80,6 @@ def MU_Processing():
     doa=Angles[doa_index]
     
     #print(td.currentThread())
-    return doa
-    '''
-    doa=[0]
     return doa
 
 def printToFile(a):     #Print something to ./filename.txt
@@ -152,14 +148,12 @@ def callback(in_data, frame_count, time_info, status):
     x=np.array(struct.unpack(str(frame_count*CHANNELS)+'i',in_data),dtype='int32')  #convert to nparray
     a=makeArray(x)
     input_buffer=a
-    w=MVDR(input_buffer,[0])
-    #print(w)
     y=np.real((np.matmul(w.conj().transpose(),a[0:ELEMENT])))
 
     if (y.shape == (CHUNK,)):
         #print("YES")
 
-        yy=monoToMu(y,CHANNELS,5)
+        yy=monoToMu(y,CHANNELS,2)
         #yy=a
         #yy=mix(x)
         yy=yy.astype(dtype="int32")
@@ -184,7 +178,7 @@ def callback(in_data, frame_count, time_info, status):
 def main():
     global input_buffer, doa, w
     doa=[0]
-    w=np.zeros([1,ELEMENT])
+    w=np.zeros([ELEMENT,ELEMENT])
     stream = p.open(format=FORMAT,
                     channels=CHANNELS,
                     rate=RATE,
@@ -205,10 +199,10 @@ def main():
     #MVDR(1)
     #heavycalctest(0)
     while stream.is_active():
-        #MU_Processing()
-        #w=MVDR(input_buffer,doa)
-        #print(doa)
-        #print(w)
+        MU_Processing()
+        w=MVDR(input_buffer,doa)
+        print(doa)
+        print(w)
         time.sleep(5)
 
     stream.stop_stream()
