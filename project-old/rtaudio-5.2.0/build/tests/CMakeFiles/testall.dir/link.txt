@@ -1,0 +1,1 @@
+/usr/bin/c++   -Wall   CMakeFiles/testall.dir/testall.cpp.o  -o testall  -Wl,-rpath,/home/pi/project/rtaudio-5.2.0/build ../librtaudio.so.6.0.2 /usr/lib/arm-linux-gnueabihf/libasound.so /usr/lib/arm-linux-gnueabihf/libpulse.so /usr/lib/arm-linux-gnueabihf/libpulse-simple.so -lpthread 

@@ -1,0 +1,10 @@
+[0;1;32m●[0m pulseaudio.service - Sound Service
+   Loaded: loaded (/usr/lib/systemd/user/pulseaudio.service; disabled; vendor preset: enabled)
+   Active: [0;1;32mactive (running)[0m since Fri 2022-11-04 22:37:40 CST; 26min ago
+ Main PID: 804 (pulseaudio)
+   CGroup: /user.slice/user-1000.slice/user@1000.service/pulseaudio.service
+           └─804 /usr/bin/pulseaudio --daemonize=no
+
+Nov 04 22:37:37 raspberrypi systemd[652]: Starting Sound Service...
+Nov 04 22:37:40 raspberrypi systemd[652]: Started Sound Service.
+Nov 04 22:37:40 raspberrypi pulseaudio[804]: E: [pulseaudio] backend-ofono.c: Failed to register as a handsfree audio agent with ofono: org.freedesktop.DBus.Error.ServiceUnknown: The name org.ofono was not provided by any .service files
