@@ -105,8 +105,8 @@ int audio_callback(const void *inputBuffer,
         
         for(int j=0;j<INPUT_CHANNEL;j++){
             //temp+=*in++/6;
-            temp+=in_sort[j][i]/6;
-            //temp+=REAL(ifft_data[j],i)/6;
+            //temp+=in_sort[j][i]/6;
+            temp+=REAL(ifft_data[j],i)/6;
 
         }
         
