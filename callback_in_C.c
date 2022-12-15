@@ -27,22 +27,18 @@ If use gsl:
 
 #define REAL(z,i) ((z)[2*(i)])
 #define IMAG(z,i) ((z)[2*(i)+1])
+#define DEG2RAD(x) (x*M_PI/180)
 
-#define FRAME_BLOCK_LEN 512
+#define FRAME_BLOCK_LEN 256
 #define SAMPLING_RATE 44100
 #define INPUT_CHANNEL 8
 #define USED_CH 6
 #define OUTPUT_CHANNEL 1
 
-PaStream *audioStream;
+#define LDA 343./1000.
+#define Radii 0.0463
 
-void SetMat(gsl_matrix_complex *m, gsl_complex n[]){
-    for(int i=0;i<m->size1;i++){
-        for(int j=0;j<m->size2;j++){
-            gsl_matrix_complex_set (m, i, j, *n++);
-        }
-    }
-}
+PaStream *audioStream;
 
 gsl_complex double2complex(double re, double im){
     gsl_complex b;
@@ -61,6 +57,34 @@ void PrintMat(gsl_matrix_complex *m, char info[]){
     }
 }
 
+void autocorr(gsl_matrix_complex *Rxx, gsl_matrix_complex *m){
+    gsl_matrix_complex *mH=gsl_matrix_complex_alloc(m->size2, m->size1);
+    gsl_matrix_complex *Imat=gsl_matrix_complex_alloc(m->size1, m->size1);
+    gsl_matrix_complex_set_identity(Imat);
+    gsl_blas_zgemm(CblasConjTrans,CblasNoTrans,double2complex(1.,0.),m,Imat,double2complex(0.,0.),mH);
+    //gsl_matrix_transpose_memcpy(mH, m);
+    gsl_blas_zgemm (CblasNoTrans, CblasNoTrans,
+                    double2complex(1./m->size2,0.), m, mH,
+                    double2complex(0.,0.), Rxx);
+}
+
+void invMat(gsl_matrix_complex *matrix,gsl_matrix_complex *inv){
+    gsl_permutation *p = gsl_permutation_alloc(matrix->size1);
+    //gsl_matrix *mattemp=gsl_matrix_alloc(matrix->size1, matrix->size2);;
+    //gsl_matrix_memcpy(mattemp,matrix);
+    int s;
+
+    gsl_linalg_complex_LU_decomp(matrix, p, &s);
+    gsl_linalg_complex_LU_invert(matrix, p, inv);
+    gsl_permutation_free(p);
+}
+
+gsl_complex eulers_formula(double x){    //e^(xi) = cos(x) + i*sin(x)
+    gsl_complex a;
+    GSL_SET_COMPLEX(&a, cos(x), sin(x));
+    return a;
+}
+
 
 int audio_callback(const void *inputBuffer,
                    void *outputBuffer, 
@@ -70,50 +94,131 @@ int audio_callback(const void *inputBuffer,
                    void *userData){
     
     float *in = (float*) inputBuffer, *out = (float*)outputBuffer;
+    double y_arr_f_to_t_domain[2*FRAME_BLOCK_LEN];
+    double *y_arr_p = y_arr_f_to_t_domain;
     static double phase = 0;
-    float in_sort[INPUT_CHANNEL][FRAME_BLOCK_LEN];
-    double fft_data[INPUT_CHANNEL][2*FRAME_BLOCK_LEN];
-    double ifft_data[INPUT_CHANNEL][2*FRAME_BLOCK_LEN];
-    gsl_matrix_complex *fft_data_mat=gsl_matrix_complex_alloc(INPUT_CHANNEL, FRAME_BLOCK_LEN);
-
-
+    float in_unsort[INPUT_CHANNEL][FRAME_BLOCK_LEN];
+    float in_sort[USED_CH][FRAME_BLOCK_LEN];
+    double fft_data[USED_CH][2*FRAME_BLOCK_LEN];
+    double ifft_data[USED_CH][2*FRAME_BLOCK_LEN];
+    int printmat=0;
+    gsl_matrix_complex *fft_data_mat=gsl_matrix_complex_alloc(USED_CH, FRAME_BLOCK_LEN);
+    gsl_matrix_complex *in_sort_mat=gsl_matrix_complex_alloc(USED_CH, FRAME_BLOCK_LEN);
+    //printf("\n\n-----------start print------------\n");
+    int ch_tag=0;
+    int zero_count=0;
     for (int i=0;i<INPUT_CHANNEL;i++){
+        float is_zero=0.;
         for (int j=0;j<FRAME_BLOCK_LEN;j++){
-            in_sort[i][j]=in[INPUT_CHANNEL*j+i];
+            in_unsort[i][j]=in[INPUT_CHANNEL*j+i];
+            is_zero+=in[INPUT_CHANNEL*j+i];
+            //printf("%f\t",in[INPUT_CHANNEL*j+i]);
+        }
+        //printf("\n\n");
+        if(is_zero==0.){
+            //printf("WHAT THE HECK DID YOU DOl?");
+            zero_count++;
+            continue;
+        }
+        //printf("\n---DONE!---\n");
+        if(zero_count>=2){
+            for(int j=0;j<FRAME_BLOCK_LEN;j++){
+                in_sort[ch_tag][j] = in_unsort[i][j];
+                //printf("%f\t",in_sort[ch_tag][j]);
+                REAL(fft_data[ch_tag],j) = in_sort[ch_tag][j];
+                IMAG(fft_data[ch_tag],j) = 0.0;
+            }
+            //printf("\n\n");
+            ch_tag++;
+        }
+    }
+    for(int i=ch_tag;i<USED_CH;i++){
+        for(int j=0;j<FRAME_BLOCK_LEN;j++){
+            in_sort[i][j] = in_unsort[i-ch_tag][j];
+            //printf("%f\t",in_sort[ch_tag][j]);
             REAL(fft_data[i],j) = in_sort[i][j];
             IMAG(fft_data[i],j) = 0.0;
+            gsl_matrix_complex_set (in_sort_mat, i, j, double2complex(in_sort[i][j], 0.));
         }
-        gsl_fft_complex_radix2_forward(fft_data[i], 1, FRAME_BLOCK_LEN);
+        //printf("\n\n");
+    }
+    //printf("<sort part>\n");
+    //for(int i=0;i<USED_CH;i++){
+    //    for (int j=0;j<FRAME_BLOCK_LEN;j++){
+    //        printf("%f\t",in_sort[i][j]);
+    //    }
+    //    printf("\n\n");
+    //}
 
+    for(int i=0;i<USED_CH;i++){
+        //printf("\n");
+        gsl_fft_complex_radix2_forward(fft_data[i], 1, FRAME_BLOCK_LEN);
         for(int k=0;k<FRAME_BLOCK_LEN;k++){
             gsl_matrix_complex_set (fft_data_mat, i, k, double2complex(REAL(fft_data[i],k), IMAG(fft_data[i],k)));
         }
     }
-    for (int i=0;i<INPUT_CHANNEL;i++){
+
+    //-------Processing in f domain-------
+    gsl_matrix_complex *Rxx=gsl_matrix_complex_alloc(fft_data_mat->size1, fft_data_mat->size1);
+    gsl_matrix_complex *invR=gsl_matrix_complex_alloc(fft_data_mat->size1, fft_data_mat->size1);
+    gsl_matrix_complex *AA=gsl_matrix_complex_alloc(1,USED_CH);
+    gsl_matrix_complex *tempww=gsl_matrix_complex_alloc(1,USED_CH);
+    gsl_matrix_complex *ww=gsl_matrix_complex_alloc(1,1);
+    gsl_matrix_complex *w=gsl_matrix_complex_alloc(USED_CH,1);
+    gsl_matrix_complex *y=gsl_matrix_complex_alloc(1, fft_data_mat->size2);
+    float doa=0.;
+    autocorr(Rxx,fft_data_mat);
+    invMat(Rxx,invR);
+    for(int i=0;i<USED_CH;i++){
+        float tempaa = sin(M_PI/2)*cos(DEG2RAD(doa)-2*i*M_PI)/USED_CH;
+        gsl_matrix_complex_set (AA, 0, i, eulers_formula(-1*2*M_PI*Radii*tempaa/LDA));
+    }
+    gsl_blas_zgemm(CblasNoTrans, CblasNoTrans, double2complex(1.,0.), AA, invR, double2complex(0.,0.), tempww);
+    gsl_blas_zgemm(CblasNoTrans, CblasConjTrans, double2complex(1.,0.), tempww, AA, double2complex(0.,0.), ww);
+    gsl_blas_zgemm(CblasNoTrans, CblasConjTrans, gsl_matrix_complex_get(ww,0,0), invR, AA, double2complex(0.,0.), w);
+    gsl_blas_zgemm(CblasConjTrans, CblasNoTrans, double2complex(1.,0.), w, in_sort_mat, double2complex(0.,0.), y);
+    for(int i=0;i<FRAME_BLOCK_LEN;i++){
+        REAL(y_arr_f_to_t_domain,i)=gsl_matrix_complex_get(y,0,i).dat[0];
+        IMAG(y_arr_f_to_t_domain,i)=gsl_matrix_complex_get(y,0,i).dat[1];
+    }
+    //gsl_fft_complex_radix2_inverse(y_arr_f_to_t_domain, 1, FRAME_BLOCK_LEN);
+    for(int i=0;i<FRAME_BLOCK_LEN;i++){
+        *out++ = *y_arr_p++;
+        *y_arr_p++;
+    }
+
+
+
+
+
+
+/*
+    for (int i=0;i<USED_CH;i++){
         _gsl_vector_complex_view temp_view=gsl_matrix_complex_row(fft_data_mat,i);
         for (int j=0;j<FRAME_BLOCK_LEN;j++){
             gsl_complex temp_vew_obj=gsl_vector_complex_get((&temp_view.vector),j);
             REAL(ifft_data[i],j)=temp_vew_obj.dat[0];
             IMAG(ifft_data[i],j)=temp_vew_obj.dat[1];
+            //printf("%f\t",REAL(ifft_data[i],j));
         }
+        //printf("\n\n");
 
         gsl_fft_complex_radix2_inverse(ifft_data[i], 1, FRAME_BLOCK_LEN);
     }
 
     for(int i=0;i<FRAME_BLOCK_LEN;i++){
-        float temp=0;
-        
-        for(int j=0;j<INPUT_CHANNEL;j++){
+        for(int j=0;j<USED_CH;j++){
+            REAL(y_arr_f_to_t_domain,i)
             //temp+=*in++/6;
             //temp+=in_sort[j][i]/6;
             temp+=REAL(ifft_data[j],i)/6;
 
         }
-        
 
         *out++ = temp;
         //*out++ = 0;
     }
+ */   
     return paContinue;
 }
 

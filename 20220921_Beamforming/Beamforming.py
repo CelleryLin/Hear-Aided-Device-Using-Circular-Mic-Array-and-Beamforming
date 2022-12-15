@@ -24,7 +24,10 @@ import sys
 from scipy.signal import hilbert
 import scipy.signal as ss
 from pyargus import directionEstimation as de
-#import matplotlib.pyplot as plt
+
+from voice_engine.source import Source
+from voice_engine.channel_picker import ChannelPicker
+from voice_engine.doa_respeaker_6mic_array import DOA
 
 #np.set_printoptions(threshold=np.inf)
 
@@ -42,7 +45,7 @@ scanning_vectors=de.gen_uca_scanning_vectors(ELEMENT, Radii, Angles)
 
 CHUNK = 2**10
 RATE = 44100
-RESPEAKER_INDEX = 1
+RESPEAKER_INDEX = 2
 
 input_buffer=np.zeros([CHANNELS,CHUNK])
 
@@ -177,7 +180,7 @@ def callback(in_data, frame_count, time_info, status):
 
 def main():
     global input_buffer, doa, w
-    doa=[0]
+    # doa=[0]
     w=np.zeros([ELEMENT,ELEMENT])
     stream = p.open(format=FORMAT,
                     channels=CHANNELS,
@@ -195,20 +198,27 @@ def main():
     #MUtd = td.Thread(target=MU_Processing,args=(1,),daemon=True)
     #MUtd.start()
     stream.start_stream()
+    src.recursive_start()
     #BFtd.start()
     #MVDR(1)
     #heavycalctest(0)
     while stream.is_active():
-        MU_Processing()
-        w=MVDR(input_buffer,doa)
-        print(doa)
-        print(w)
+        print(doa.get_direction())
+        #MU_Processing()
+        #w=MVDR(input_buffer,doa)
+        #print(doa)
+        #print(w)
         time.sleep(5)
 
     stream.stop_stream()
     stream.close()
+    src.recursive_stop()
 
     p.terminate()
 
 if ( __name__== "__main__"):
+    global doa
+    src = Source(rate=16000, channels=8)
+    doa = DOA(rate=16000)
+    src.link(doa)
     main()
