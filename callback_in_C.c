@@ -7,7 +7,11 @@ Compile and link:
 If use gsl:
 
     gcc callback_in_C.c -lportaudio -lgsl -lgslcblas -lm
+
+If use fftw:
+
 */
+
 
 #include <stdio.h>
 #include <math.h>
