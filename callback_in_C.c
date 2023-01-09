@@ -8,8 +8,8 @@ If use gsl:
 
     gcc callback_in_C.c -lportaudio -lgsl -lgslcblas -lm
 
-If use fftw:
-
+If use fftwf:
+    gcc callback_in_C.c -lportaudio -lgsl -lgslcblas -lfftw3f -lm
 */
 
 
@@ -27,6 +27,7 @@ If use fftw:
 #include <gsl/gsl_statistics_double.h>
 #include <gsl/gsl_linalg.h>
 #include <fftw3.h>
+#include <complex.h>
 
 #include "portaudio.h"
 
@@ -34,7 +35,7 @@ If use fftw:
 #define IMAG(z,i) ((z)[2*(i)+1])
 #define DEG2RAD(x) (x*M_PI/180)
 
-#define FRAME_BLOCK_LEN 1024
+#define FRAME_BLOCK_LEN 512
 #define SAMPLING_RATE 44100
 #define INPUT_CHANNEL 8
 #define USED_CH 6
@@ -42,11 +43,10 @@ If use fftw:
 
 #define LDA 343./1000.
 #define Radii 0.0463
-#define Ksnr 0.05
-#define GAIN 2
+#define Ksnr 0.01
+#define GAIN 0.4
 
 PaStream *audioStream;
-double snr=1.;
     
 gsl_complex double2complex(double re, double im){
     gsl_complex b;
@@ -55,35 +55,36 @@ gsl_complex double2complex(double re, double im){
     return b;
 }
 
-float SNR(double a[],double m_freq, double bandwidth){
-    double noise_avg=0.;
-    double signal_avg=0.;
-    double power_spectrum[FRAME_BLOCK_LEN];
-    int m_n = (int)(m_freq*FRAME_BLOCK_LEN/SAMPLING_RATE)+(FRAME_BLOCK_LEN/2)+1;
+float SNR(fftwf_complex a[],double m_freq, double bandwidth){
+    float noise_avg=0.;
+    float signal_avg=0.;
+    float power_spectrum[FRAME_BLOCK_LEN/2+1];
+    int m_n = (int)(m_freq*FRAME_BLOCK_LEN/SAMPLING_RATE/2+1);
     int bandwidth_n = (int)(bandwidth*FRAME_BLOCK_LEN/SAMPLING_RATE);
 
-    for (int i=0; i<FRAME_BLOCK_LEN; i++) {
-        power_spectrum[i] = REAL(a,i) * REAL(a,i) + IMAG(a,i) * IMAG(a,i);
+    for (int i=0; i<FRAME_BLOCK_LEN/2+1; i++) {
+        power_spectrum[i] = a[i][0] * a[i][0] + a[i][1] * a[i][1];
     }
     
     
-    for(int i=(FRAME_BLOCK_LEN/2)+1;i<FRAME_BLOCK_LEN;i++){
-        noise_avg+=fabs(REAL(power_spectrum,i));
+    for(int i=0;i<FRAME_BLOCK_LEN/2+1;i++){
+        noise_avg+=power_spectrum[i];
     }
-    noise_avg/=(FRAME_BLOCK_LEN/2);
+    noise_avg/=(FRAME_BLOCK_LEN/2+1);
 
     for(int i=m_n-bandwidth_n;i<=m_n+bandwidth_n;i++){
-        signal_avg+=fabs(REAL(power_spectrum,i));
+        signal_avg+=power_spectrum[i];
     }
-    signal_avg/=bandwidth_n;
+    //printf("%f\n", signal_avg);
+    signal_avg/=(bandwidth_n*2+1);
 
     //if((signal_avg/noise_avg)>3){
     //    printf("%f\n",(signal_avg/noise_avg));
     //}
     
-    printf("%f\t%f\n",signal_avg,noise_avg);
-    printf("%f\n",power_spectrum[100]);
-    //return (signal_avg/noise_avg);
+    //printf("%f\t%f\n",signal_avg,noise_avg);
+    //printf("%f\n",signal_avg/noise_avg);
+    return (signal_avg/noise_avg);
     //return (signal_avg);
 }
 
@@ -134,17 +135,19 @@ int audio_callback(const void *inputBuffer,
                    void *userData){
     
     float *in = (float*) inputBuffer, *out = (float*)outputBuffer;
-    double y_arr_f_to_t_domain[2*FRAME_BLOCK_LEN];
-    double *y_arr_p = y_arr_f_to_t_domain;
+    float y_arr_f_to_t_domain[2*FRAME_BLOCK_LEN];
+    float *y_arr_p = y_arr_f_to_t_domain;
     static double phase = 0;
     float in_unsort[INPUT_CHANNEL][FRAME_BLOCK_LEN];
     float in_sort[USED_CH][FRAME_BLOCK_LEN];
-    double fft_data[USED_CH][2*FRAME_BLOCK_LEN];
-    double ifft_data[USED_CH][2*FRAME_BLOCK_LEN];
+    double snr=1.;
+    fftwf_complex input_fft_data[USED_CH][FRAME_BLOCK_LEN/2+1];
+    fftwf_plan plan;
+    fftwf_complex output_fft_data[FRAME_BLOCK_LEN/2+1];
     int printmat=0;
-    gsl_matrix_complex *fft_data_mat=gsl_matrix_complex_alloc(USED_CH, FRAME_BLOCK_LEN);
+    gsl_matrix_complex *fft_data_mat=gsl_matrix_complex_alloc(USED_CH, FRAME_BLOCK_LEN/2+1);
     gsl_matrix_complex *in_sort_mat=gsl_matrix_complex_alloc(USED_CH, FRAME_BLOCK_LEN);
-    plan = fftw_plan_dft_r2c_1d(FRAME_BLOCK_LEN, input, output, FFTW_ESTIMATE);
+    
     //printf("\n\n-----------start print------------\n");
     int ch_tag=0;
     int zero_count=0;
@@ -165,9 +168,8 @@ int audio_callback(const void *inputBuffer,
         if(zero_count>=2){
             for(int j=0;j<FRAME_BLOCK_LEN;j++){
                 in_sort[ch_tag][j] = in_unsort[i][j];
-                //printf("%f\t",in_sort[ch_tag][j]);
-                REAL(fft_data[ch_tag],j) = in_sort[ch_tag][j];
-                IMAG(fft_data[ch_tag],j) = 0.0;
+                //REAL(input_fft_data[ch_tag],j) = in_sort[ch_tag][j];
+                //IMAG(input_fft_data[ch_tag],j) = 0.0;
             }
             //printf("\n\n");
             ch_tag++;
@@ -177,8 +179,8 @@ int audio_callback(const void *inputBuffer,
         for(int j=0;j<FRAME_BLOCK_LEN;j++){
             in_sort[i][j] = in_unsort[i-ch_tag][j];
             //printf("%f\t",in_sort[ch_tag][j]);
-            REAL(fft_data[i],j) = in_sort[i][j];
-            IMAG(fft_data[i],j) = 0.0;
+            //REAL(input_fft_data[i],j) = in_sort[i][j];
+            //IMAG(input_fft_data[i],j) = 0.0;
             gsl_matrix_complex_set (in_sort_mat, i, j, double2complex(in_sort[i][j], 0.));
         }
         //printf("\n\n");
@@ -191,15 +193,24 @@ int audio_callback(const void *inputBuffer,
     //    printf("\n\n");
     //}
 
+
     for(int i=0;i<USED_CH;i++){
         //printf("\n");
+        plan = fftwf_plan_dft_r2c_1d(FRAME_BLOCK_LEN, in_sort[i], input_fft_data[i], FFTW_ESTIMATE);
+        fftwf_execute(plan);
 
-        gsl_fft_complex_radix2_forward(fft_data[i], 1, FRAME_BLOCK_LEN);
-        for(int k=0;k<FRAME_BLOCK_LEN;k++){
-            gsl_matrix_complex_set (fft_data_mat, i, k, double2complex(REAL(fft_data[i],k), IMAG(fft_data[i],k)));
+        //gsl_fft_complex_radix2_forward(input_fft_data[i], 1, FRAME_BLOCK_LEN);
+        for(int k=0;k<FRAME_BLOCK_LEN/2+1;k++){
+            gsl_matrix_complex_set (fft_data_mat, i, k, double2complex(input_fft_data[i][k][0], input_fft_data[i][k][1]));
         }
     }
-
+    
+    //for(int i=0;i<FRAME_BLOCK_LEN;i++){
+    //    printf("%f\t",input_fft_data[4][i][0]);
+    //}
+    //printf("\n");
+    
+    //PrintMat(fft_data_mat,"---");
     //-------Processing in f domain-------
     gsl_matrix_complex *Rxx=gsl_matrix_complex_alloc(fft_data_mat->size1, fft_data_mat->size1);
     gsl_matrix_complex *invR=gsl_matrix_complex_alloc(fft_data_mat->size1, fft_data_mat->size1);
@@ -207,7 +218,7 @@ int audio_callback(const void *inputBuffer,
     gsl_matrix_complex *tempww=gsl_matrix_complex_alloc(1,USED_CH);
     gsl_matrix_complex *ww=gsl_matrix_complex_alloc(1,1);
     gsl_matrix_complex *w=gsl_matrix_complex_alloc(USED_CH,1);
-    gsl_matrix_complex *y=gsl_matrix_complex_alloc(1, fft_data_mat->size2);
+    gsl_matrix_complex *y=gsl_matrix_complex_alloc(1, FRAME_BLOCK_LEN);
     float doa=0.;
     autocorr(Rxx,fft_data_mat);
     invMat(Rxx,invR);
@@ -215,6 +226,7 @@ int audio_callback(const void *inputBuffer,
         float tempaa = sin(M_PI/2)*cos(DEG2RAD(doa)-2*i*M_PI)/USED_CH;
         gsl_matrix_complex_set (AA, 0, i, eulers_formula(-1*2*M_PI*Radii*tempaa/LDA));
     }
+    
     gsl_blas_zgemm(CblasNoTrans, CblasNoTrans, double2complex(1.,0.), AA, invR, double2complex(0.,0.), tempww);
     gsl_blas_zgemm(CblasNoTrans, CblasConjTrans, double2complex(1.,0.), tempww, AA, double2complex(0.,0.), ww);
     gsl_blas_zgemm(CblasNoTrans, CblasConjTrans, gsl_matrix_complex_get(ww,0,0), invR, AA, double2complex(0.,0.), w);
@@ -224,7 +236,7 @@ int audio_callback(const void *inputBuffer,
             gsl_complex_add(
                 gsl_complex_mul(
                     gsl_matrix_complex_get(w,i,0),
-                    double2complex(Ksnr,0.)),
+                    double2complex(GAIN*Ksnr*snr,0.)),
                 double2complex(GAIN*(1-Ksnr*snr), 0.)));
     }
     
@@ -233,25 +245,29 @@ int audio_callback(const void *inputBuffer,
         REAL(y_arr_f_to_t_domain,i)=gsl_matrix_complex_get(y,0,i).dat[0];
         IMAG(y_arr_f_to_t_domain,i)=gsl_matrix_complex_get(y,0,i).dat[1];
     }
-    double original[2*FRAME_BLOCK_LEN];  // original audio using complex form
-    double *p_original=original;
+    
+    float original[FRAME_BLOCK_LEN];  // original audio using complex form
+    float *p_original=original;
 
-    for(int i=0;i<2*FRAME_BLOCK_LEN;i+=2){
-        float tmp=0;
-        for(int j=0;j<USED_CH;j++){
-            tmp+=in_sort[j][i];
-        }
-
-        original[i]=tmp;
-        original[i+1]=0.;
+    for(int i=0;i<FRAME_BLOCK_LEN;i++){
+        //float tmp=0;
+        //for(int j=0;j<USED_CH;j++){
+        //    tmp+=in_sort[j][i];
+        //}
+        //original[i]=tmp;
         *out++ = *y_arr_p++;
         *y_arr_p++;
     }
-    gsl_fft_complex_radix2_forward(y_arr_f_to_t_domain, 1, FRAME_BLOCK_LEN);
-    snr = SNR(y_arr_f_to_t_domain, 343./LDA, 60.);
+    plan = fftwf_plan_dft_r2c_1d(FRAME_BLOCK_LEN, y_arr_f_to_t_domain, output_fft_data, FFTW_ESTIMATE);
+    fftwf_execute(plan);
+    //gsl_fft_complex_radix2_forward(y_arr_f_to_t_domain, 1, FRAME_BLOCK_LEN);
+    snr = SNR(output_fft_data, 343./(LDA), 150.);
+    printf("%f\n",snr);
     
     //gsl_fft_complex_radix2_inverse(y_arr_f_to_t_domain, 1, FRAME_BLOCK_LEN);
 
+    //Free these all Fucking things
+    
     return paContinue;
 }
 

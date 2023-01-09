@@ -10,7 +10,10 @@
         "utility": "c",
         "valarray": "c",
         "stdio.h": "c",
-        "gsl_statistics_double.h": "c"
+        "gsl_statistics_double.h": "c",
+        "fftw3.h": "c",
+        "gsl_complex_math.h": "c"
     },
-    "C_Cpp.errorSquiggles": "Disabled"
+    "C_Cpp.errorSquiggles": "Disabled",
+    "cmake.configureOnOpen": false
 }
