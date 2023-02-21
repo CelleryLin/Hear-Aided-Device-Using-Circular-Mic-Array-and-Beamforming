@@ -41,20 +41,17 @@ If use fftwf:
 #define USED_CH 6
 #define OUTPUT_CHANNEL 1
 
-#define TEMPERATURE 334.
+#define TEMPERATURE 340.
 #define LDA TEMPERATURE/600.
 #define Radii 0.0463
 
-#define Ka 10000.           //Adjust compressor strength
+#define Ka 100000.           //Adjust compressor strength
 #define Kb 1.          //Adjust compressor strength (Bypass: Ka=1, Kb=0)
 #define Kmvdr 1.        //Adjust snr strength
 #define snr_gate 0          //treshold of snr
-#define GAIN 0.8
-#define Kp 0.05
-#define Ki 0.0
-#define Kd 0.0
+#define GAIN 3
 
-#define wKp 0.5
+#define wKp 0.7
 #define wKi 0.0
 #define wKd 0.
 
@@ -62,6 +59,12 @@ float snr=1.;
 float snr0=0.;
 float snr_Intergral_val=0.;
 float snr_Previous_error=0.;
+
+float doa=1.;
+float doa0=0.;
+float doa_Intergral_val=0.;
+float doa_Previous_error=0.;
+
 gsl_matrix_complex *w0;
 gsl_matrix_complex *w_Intergral_val;
 gsl_matrix_complex *w_Previous_error;
@@ -105,7 +108,7 @@ gsl_matrix_complex PID_matrix(gsl_matrix_complex *a, gsl_matrix_complex *a0){
     return *new_val;
 }
 
-float PID(float a, float a0){
+float PID(float a, float a0, float Kp, float Ki, float Kd, float Intergral_val, float Previous_error){
     float error=a-a0;
     snr_Intergral_val += error;
     float Derivative_val = error - snr_Previous_error;
@@ -235,6 +238,14 @@ int audio_callback(const void *inputBuffer,
     float *y_arr_p = y_arr_f_to_t_domain;
     float *snr_p = &snr;
     float *snr0_p = &snr0;
+    float *snr_Intergral_val_p = &snr_Intergral_val;
+    float *snr_Previous_error_p = &snr_Previous_error;
+
+    float *doa_p=&doa;
+    float *doa0_p=&doa0;
+    float *doa_Intergral_val_p=&doa_Intergral_val;
+    float *doa_Previous_error_p=&doa_Previous_error;
+
     static double phase = 0;
     float in_unsort[INPUT_CHANNEL][FRAME_BLOCK_LEN];
     float in_sort[USED_CH][FRAME_BLOCK_LEN];
@@ -318,27 +329,47 @@ int audio_callback(const void *inputBuffer,
     gsl_matrix_complex *ww=gsl_matrix_complex_alloc(1,1);
     gsl_matrix_complex *w=gsl_matrix_complex_alloc(USED_CH,1);
     gsl_matrix_complex *y=gsl_matrix_complex_alloc(1, FRAME_BLOCK_LEN);
-    
-    float doa=0.;
+    double max_ww=-1;
     autocorr(Rxx,fft_data_mat);
     invMat(Rxx,invR);
     Compress_Mat(invR);
     //PrintMat(invR,"INVR");
     //abort();
-    //for(int l=400; l<2000; l+=100){
-        for(int i=0;i<USED_CH;i++){
-            float tempaa = (float) (sin(M_PI/2)*cos(DEG2RAD((double)doa)-2*i*M_PI/USED_CH));
-            gsl_matrix_complex_set (AA, 0, i, eulers_formula(-1*2*M_PI*Radii*tempaa/(LDA)));
+    //for(int l=400; l<600; l+=100){
+        for(int idoa=0; idoa<360; idoa+=5){
+            for(int i=0;i<USED_CH;i++){
+                float tempaa = (float) (sin(M_PI/2)*cos(DEG2RAD((double)idoa)-2*i*M_PI/USED_CH));
+                gsl_matrix_complex_set (AA, 0, i, eulers_formula(-1*2*M_PI*Radii*tempaa/(LDA)));
+            }
+            gsl_blas_zgemm(CblasNoTrans, CblasNoTrans, double2complex(1.,0.), AA, invR, double2complex(0.,0.), tempww);
+            gsl_blas_zgemm(CblasNoTrans, CblasConjTrans, double2complex(1.,0.), tempww, AA, double2complex(0.,0.), ww);
+            //gsl_matrix_complex_set(ww,0,0,double2complex(
+            //        Compress(gsl_matrix_complex_get(ww,0,0).dat[0]),    //Compress the gain of ww
+            //        gsl_matrix_complex_get(ww,0,0).dat[1]));
+            //printf("%f\t%f\n",gsl_complex_div(double2complex(1.,0.),gsl_matrix_complex_get(ww,0,0)));
+            //PrintMat(ww,"w");
+            if(gsl_matrix_complex_get(ww,0,0).dat[0]>max_ww){
+                max_ww=gsl_matrix_complex_get(ww,0,0).dat[0];
+                *doa_p=idoa;
+            }
         }
-        
-        gsl_blas_zgemm(CblasNoTrans, CblasNoTrans, double2complex(1.,0.), AA, invR, double2complex(0.,0.), tempww);
-        gsl_blas_zgemm(CblasNoTrans, CblasConjTrans, double2complex(1.,0.), tempww, AA, double2complex(0.,0.), ww);
-        //gsl_matrix_complex_set(ww,0,0,double2complex(
-        //        Compress(gsl_matrix_complex_get(ww,0,0).dat[0]),    //Compress the gain of ww
-        //        gsl_matrix_complex_get(ww,0,0).dat[1]));
-        //printf("%f\t%f\n",gsl_complex_div(double2complex(1.,0.),gsl_matrix_complex_get(ww,0,0)));
         //PrintMat(ww,"w");
-        gsl_blas_zgemm(CblasNoTrans, CblasConjTrans, gsl_complex_div(double2complex(1.,0.),gsl_matrix_complex_get(ww,0,0)), invR, AA, double2complex(0.,0.), w);
+        *doa_p=PID(*doa_p,*doa0_p,0.05,0,0,*doa_Intergral_val_p,*doa_Previous_error_p);
+        *doa0_p=*doa_p;
+
+        //for(int i=0;i<USED_CH;i++){
+        //        float tempaa = (float) (sin(M_PI/2)*cos(DEG2RAD((double)*doa_p)-2*i*M_PI/USED_CH));
+        //        gsl_matrix_complex_set (AA, 0, i, eulers_formula(-1*2*M_PI*Radii*tempaa/(LDA)));
+        //    }
+        //    gsl_blas_zgemm(CblasNoTrans, CblasNoTrans, double2complex(1.,0.), AA, invR, double2complex(0.,0.), tempww);
+        //    gsl_blas_zgemm(CblasNoTrans, CblasConjTrans, double2complex(1.,0.), tempww, AA, double2complex(0.,0.), ww);
+
+        //printf("%f\n",*doa_p);
+        for(int i=0;i<USED_CH;i++){
+                float tempaa = (float) (sin(M_PI/2)*cos(DEG2RAD((double)*doa_p)-2*i*M_PI/USED_CH));
+                gsl_matrix_complex_set (AA, 0, i, eulers_formula(-1*2*M_PI*Radii*tempaa/(LDA)));
+        }
+        gsl_blas_zgemm(CblasNoTrans, CblasConjTrans, double2complex(1./(max_ww),0.), invR, AA, double2complex(0.,0.), w);
 
     //}
     //printf("%f\n",gsl_complex_div(double2complex(1.,0.),gsl_matrix_complex_get(ww,0,0)));
@@ -351,14 +382,17 @@ int audio_callback(const void *inputBuffer,
     //                double2complex(Kmvdr,0.)),
     //            double2complex((1-Kmvdr), 0.)));
     //}
-    //printf("%f\n",snr_tmp);
+    for(int i=0;i<*doa_p/5;i++){
+        printf(" ");
+    }
+    printf("|\n");
     //PrintMat(w,"w");
     //*w=PID_matrix(w,w0);
     //*w0=*w;
-    gsl_blas_zgemm(CblasConjTrans, CblasNoTrans, double2complex(GAIN*(*snr_p),0.), w, in_sort_mat, double2complex(0.,0.), y);
+    gsl_blas_zgemm(CblasConjTrans, CblasNoTrans, double2complex(GAIN,0.), w, in_sort_mat, double2complex(0.,0.), y);
     //PrintMat(y,"y");
     for(int i=0;i<FRAME_BLOCK_LEN;i++){
-        // y_arr_f_to_t_domain[i] = (float) gsl_complex_abs(gsl_matrix_complex_get(y,0,i));
+        //y_arr_f_to_t_domain[i] = (float) gsl_complex_abs(gsl_matrix_complex_get(y,0,i));
         y_arr_f_to_t_domain[i] = (float) gsl_matrix_complex_get(y,0,i).dat[0];
         //printf("%f\t",y_arr_f_to_t_domain[i]);
     }
@@ -368,12 +402,12 @@ int audio_callback(const void *inputBuffer,
     float *p_original=original;
 
     for(int i=0;i<FRAME_BLOCK_LEN;i++){
-        float tmp=0;
-        for(int j=0;j<USED_CH;j++){
-            tmp+=(in_sort[j][i]/6);
-            //tmp+=output[j][i];
-        }
-        original[i]=tmp;
+        //float tmp=0;
+        //for(int j=0;j<USED_CH;j++){
+        //    tmp+=(in_sort[j][i]/6);
+        //    //tmp+=output[j][i];
+        //}
+        //original[i]=tmp;
         //*out++ = *p_original++;
         *out++ = *y_arr_p++;
         //*y_arr_p++;
@@ -381,9 +415,10 @@ int audio_callback(const void *inputBuffer,
     plan = fftwf_plan_dft_r2c_1d(FRAME_BLOCK_LEN, y_arr_f_to_t_domain, output_fft_data, FFTW_ESTIMATE);
     fftwf_execute(plan);
     //gsl_fft_complex_radix2_forward(y_arr_f_to_t_domain, 1, FRAME_BLOCK_LEN);
-    *snr_p = SNR(output_fft_data, 343./(LDA), 10.);
+    //*snr_p = SNR(output_fft_data, 343./(LDA), 10.);
     //printf("%f\n",*snr_p);
-    *snr_p = PID(*snr_p,*snr0_p);
+    //*snr_p = PID(*snr_p,*snr0_p, 0.05, 0, 0, *snr_Intergral_val_p, *snr_Previous_error_p);
+    
     //printf("%f\n",*snr_p);
     //gsl_fft_complex_radix2_inverse(y_arr_f_to_t_domain, 1, FRAME_BLOCK_LEN);
 
