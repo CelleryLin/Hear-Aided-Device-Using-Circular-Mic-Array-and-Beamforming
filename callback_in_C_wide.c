@@ -50,7 +50,7 @@ If use fftwf:
 #define Kb 1.          //Adjust compressor strength (Bypass: Ka=1, Kb=0)
 #define Kmvdr 1.        //Adjust snr strength
 #define snr_gate 0          //treshold of snr
-#define GAIN 20
+#define GAIN 10
 
 #define wKp 0.7
 #define wKi 0.0
@@ -375,7 +375,7 @@ int audio_callback(const void *inputBuffer,
         }
 
         gsl_blas_zgemm(CblasNoTrans, CblasConjTrans, gsl_complex_div(double2complex(1.,0.),gsl_matrix_complex_get(bestww,0,0)), invR, bestAA, double2complex(0.,0.), w);
-        gsl_blas_zgemm(CblasConjTrans, CblasNoTrans, double2complex(GAIN/(float)BANDCOUNT,0.), w, in_sort_mat, double2complex(1./(float)BANDCOUNT,0.), y);
+        gsl_blas_zgemm(CblasConjTrans, CblasNoTrans, double2complex(GAIN*(*snr_p)/(float)BANDCOUNT,0.), w, in_sort_mat, double2complex(1./(float)BANDCOUNT,0.), y);
     }
     //PrintMat(y,"y");
     for(int i=0;i<FRAME_BLOCK_LEN;i++){
@@ -399,18 +399,17 @@ int audio_callback(const void *inputBuffer,
         *out++ = *y_arr_p++;
         //*y_arr_p++;
     }
-    plan = fftwf_plan_dft_r2c_1d(FRAME_BLOCK_LEN, y_arr_f_to_t_domain, output_fft_data, FFTW_ESTIMATE);
-    fftwf_execute(plan);
-    //gsl_fft_complex_radix2_forward(y_arr_f_to_t_domain, 1, FRAME_BLOCK_LEN);
-    //*snr_p = SNR(output_fft_data, 343./(LDA), 10.);
+    //plan = fftwf_plan_dft_r2c_1d(FRAME_BLOCK_LEN, y_arr_f_to_t_domain, output_fft_data, FFTW_ESTIMATE);
+    //fftwf_execute(plan);
+    //*snr_p = SNR(output_fft_data, 20000, 10.);
     //printf("%f\n",*snr_p);
-    //*snr_p = PID(*snr_p,*snr0_p, 0.05, 0, 0, *snr_Intergral_val_p, *snr_Previous_error_p);
+    //*snr_p = PID(*snr_p,*snr0_p, 0.001, 0, 0, *snr_Intergral_val_p, *snr_Previous_error_p);
+    //*snr0_p = *snr_p;
     
     //printf("%f\n",*snr_p);
     //gsl_fft_complex_radix2_inverse(y_arr_f_to_t_domain, 1, FRAME_BLOCK_LEN);
 
     //Free these all Fucking things
-    *snr0_p = *snr_p;
     gsl_matrix_complex_free(Rxx);
     gsl_matrix_complex_free(invR);
     gsl_matrix_complex_free(AA);
