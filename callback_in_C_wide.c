@@ -9,7 +9,7 @@ If use gsl:
     gcc callback_in_C.c -lportaudio -lgsl -lgslcblas -lm
 
 If use fftwf:
-    gcc callback_in_C.c -lportaudio -lgsl -lgslcblas -lfftw3f -lm
+    gcc callback_in_C_wide.c -lportaudio -lgsl -lgslcblas -lfftw3f -lm
 */
 
 
@@ -35,7 +35,7 @@ If use fftwf:
 #define IMAG(z,i) ((z)[2*(i)+1])
 #define DEG2RAD(x) (x*M_PI/180)
 
-#define FRAME_BLOCK_LEN 512
+#define FRAME_BLOCK_LEN 1024
 #define SAMPLING_RATE 44100
 #define INPUT_CHANNEL 8
 #define USED_CH 6
@@ -43,14 +43,14 @@ If use fftwf:
 #define BANDCOUNT 10
 
 #define TEMPERATURE 340.
-#define LDA TEMPERATURE/800.
+#define LDA TEMPERATURE/200.
 #define Radii 0.0463
 
 #define Ka 100000.           //Adjust compressor strength
 #define Kb 1.          //Adjust compressor strength (Bypass: Ka=1, Kb=0)
 #define Kmvdr 1.        //Adjust snr strength
 #define snr_gate 0          //treshold of snr
-#define GAIN 10
+#define GAIN 50
 
 #define wKp 0.7
 #define wKi 0.0
@@ -115,6 +115,11 @@ float PID(float a, float a0, float Kp, float Ki, float Kd, float Intergral_val, 
     float Derivative_val = error - snr_Previous_error;
     snr_Previous_error = error;
     double new_val =a0 + (Kp * error + Ki * snr_Intergral_val + Kd * Derivative_val);
+    return new_val;
+}
+
+float EMA(float a, float a0, float alpha){
+    float new_val = a0 + alpha * (a - a0);
     return new_val;
 }
 
@@ -359,16 +364,17 @@ int audio_callback(const void *inputBuffer,
         }
     }
 
-    *doa_p=PID(*doa_p,*doa0_p,0.1,0,0,*doa_Intergral_val_p,*doa_Previous_error_p);
+    //*doa_p=PID(*doa_p,*doa0_p,0.1,0,0,*doa_Intergral_val_p,*doa_Previous_error_p);
+    *doa_p = EMA(*doa_p, *doa0_p, 0.1);
     *doa0_p=*doa_p;
-
+    // *doa_p=0;
     //for(int i=0;i<*doa_p/5;i++){
     //    printf(" ");
     //}
     //printf("|\n");
 
 
-    for(int l=400; l<100*BANDCOUNT; l+=100){
+    for(int l=600; l<100*BANDCOUNT; l+=100){    //Wide band
         for(int i=0;i<USED_CH;i++){
                 float tempaa = (float) (sin(M_PI/2)*cos(DEG2RAD((double)*doa_p)-2*i*M_PI/USED_CH));
                 gsl_matrix_complex_set (bestAA, 0, i, eulers_formula(-1*2*M_PI*Radii*tempaa/(TEMPERATURE/l)));
@@ -376,6 +382,8 @@ int audio_callback(const void *inputBuffer,
 
         gsl_blas_zgemm(CblasNoTrans, CblasConjTrans, gsl_complex_div(double2complex(1.,0.),gsl_matrix_complex_get(bestww,0,0)), invR, bestAA, double2complex(0.,0.), w);
         gsl_blas_zgemm(CblasConjTrans, CblasNoTrans, double2complex(GAIN*(*snr_p)/(float)BANDCOUNT,0.), w, in_sort_mat, double2complex(1./(float)BANDCOUNT,0.), y);
+        // gsl_blas_zgemm(CblasConjTrans, CblasNoTrans, double2complex(GAIN/(float)BANDCOUNT,0.), w, in_sort_mat, double2complex(1./(float)BANDCOUNT,0.), y);
+        
     }
     //PrintMat(y,"y");
     for(int i=0;i<FRAME_BLOCK_LEN;i++){
@@ -399,14 +407,15 @@ int audio_callback(const void *inputBuffer,
         *out++ = *y_arr_p++;
         //*y_arr_p++;
     }
-    //plan = fftwf_plan_dft_r2c_1d(FRAME_BLOCK_LEN, y_arr_f_to_t_domain, output_fft_data, FFTW_ESTIMATE);
-    //fftwf_execute(plan);
-    //*snr_p = SNR(output_fft_data, 20000, 10.);
+    plan = fftwf_plan_dft_r2c_1d(FRAME_BLOCK_LEN, y_arr_f_to_t_domain, output_fft_data, FFTW_ESTIMATE);
+    fftwf_execute(plan);
+    *snr_p = SNR(output_fft_data, 20000, 10.);
     //printf("%f\n",*snr_p);
-    //*snr_p = PID(*snr_p,*snr0_p, 0.001, 0, 0, *snr_Intergral_val_p, *snr_Previous_error_p);
-    //*snr0_p = *snr_p;
+    // *snr_p = PID(*snr_p,*snr0_p, 0.001, 0, 0, *snr_Intergral_val_p, *snr_Previous_error_p);
+    *snr_p = EMA(*snr_p,*snr0_p, 0.05);
+    *snr0_p = *snr_p;
     
-    //printf("%f\n",*snr_p);
+    printf("%f\n",*snr_p);
     //gsl_fft_complex_radix2_inverse(y_arr_f_to_t_domain, 1, FRAME_BLOCK_LEN);
 
     //Free these all Fucking things
