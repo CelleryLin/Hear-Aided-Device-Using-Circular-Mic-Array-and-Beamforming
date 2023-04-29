@@ -2,14 +2,14 @@
 This program monitors audio in real-time.
 Compile and link:
 
-    gcc callback_in_C.c -lportaudio -lm
+    gcc callback_in_rnn.c -lportaudio -lm
 
 If use gsl:
 
-    gcc callback_in_C.c -lportaudio -lgsl -lgslcblas -lm
+    gcc callback_in_rnn.c -lportaudio -lgsl -lgslcblas -lm
 
 If use fftwf:
-    gcc callback_in_C_wide.c -lportaudio -lgsl -lgslcblas -lfftw3f -lm
+    gcc callback_in_rnn.c -lportaudio -lgsl -lgslcblas -lfftw3f -lm
 */
 
 
