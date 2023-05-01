@@ -13,8 +13,15 @@
         "gsl_statistics_double.h": "c",
         "fftw3.h": "c",
         "gsl_complex_math.h": "c",
-        "random": "c"
+        "random": "c",
+        "nnom.h": "c",
+        "equalizer_coeff.h": "c",
+        "gsl_linalg.h": "c",
+        "mfcc.h": "c",
+        "stdint.h": "c",
+        "denoise_weights.h": "c"
     },
     "C_Cpp.errorSquiggles": "Disabled",
-    "cmake.configureOnOpen": false
+    "cmake.configureOnOpen": false,
+    "workbench.editor.enablePreview": true
 }

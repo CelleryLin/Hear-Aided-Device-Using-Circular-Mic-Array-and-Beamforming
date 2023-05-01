@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "gsl_complex.h": "c",
+        "denoise_weights.h": "c"
+    }
+}

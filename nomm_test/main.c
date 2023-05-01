@@ -2,29 +2,15 @@
 This program monitors audio in real-time.
 Compile and link:
 
-    gcc callback_in_C_rnn.c -lportaudio -lm
+    gcc callback_in_C.c -lportaudio -lm
 
 If use gsl:
 
-    gcc callback_in_C_rnn.c -lportaudio -lgsl -lgslcblas -lm
+    gcc callback_in_C.c -lportaudio -lgsl -lgslcblas -lm
 
 If use fftwf:
-    gcc callback_in_C_rnn.c -lportaudio -lgsl -lgslcblas -lfftw3f -lm
+    gcc callback_in_C_wide.c -lportaudio -lgsl -lgslcblas -lfftw3f -lm
 */
-
-/*
- * Copyright (c) 2018-2020, Jianjia Ma
- *
- * SPDX-License-Identifier: Apache-2.0
- *
- * Change Logs:
- * Date           Author       Notes
- * 2020-09-09     Jianjia Ma   The first version
- *
- *
- * This file is apart of NNoM examples, which aims to provide clear demo of every steps. 
- * Therefor, it is not optimized for neither space and speed. 
- */
 
 
 #include <stdio.h>
@@ -44,24 +30,12 @@ If use fftwf:
 #include <complex.h>
 
 #include "portaudio.h"
-#include <stdint.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <math.h>
-#include <string.h>
-
-#include "nnom.h"
-#include "denoise_weights.h"
-// #include "mfcc.h"
-
-// the bandpass filter coefficiences
-// #include "equalizer_coeff.h" 
 
 #define REAL(z,i) ((z)[2*(i)])
 #define IMAG(z,i) ((z)[2*(i)+1])
 #define DEG2RAD(x) (x*M_PI/180)
 
-#define FRAME_BLOCK_LEN 512
+#define FRAME_BLOCK_LEN 1024
 #define SAMPLING_RATE 44100
 #define INPUT_CHANNEL 8
 #define USED_CH 6
@@ -82,18 +56,60 @@ If use fftwf:
 #define wKi 0.0
 #define wKd 0.
 
-//--- rnn-denoise ---
+// --- rnn denoise ---
+#include "nnom.h"
+#include "denoise_weights.h"
+#include "mfcc.h"
+
+ // the bandpass filter coefficiences
+#include "equalizer_coeff.h" 
 
 #define NUM_FEATURES NUM_FILTER
 
 #define _MAX(x, y) (((x) > (y)) ? (x) : (y))
 #define _MIN(x, y) (((x) < (y)) ? (x) : (y))
+#define SaturaLH(N, L, H) (((N)<(L))?(L):(((N)>(H))?(H):(N)))
 
-#define RNN_NUM_CHANNELS 	1
-#define RNN_SAMPLE_RATE 	16000
-#define RNN_AUDIO_FRAME_LEN 512
+#define RNN_GAIN_IN     5.0f
+#define RNN_GAIN_OUT    0.5f
+#define NUM_CHANNELS 	1
+#define SAMPLE_RATE 	SAMPLING_RATE
+#define AUDIO_FRAME_LEN FRAME_BLOCK_LEN
 
-//-------------------
+// audio buffer for input
+float audio_buffer[AUDIO_FRAME_LEN] = {0};
+int16_t audio_buffer_16bit[AUDIO_FRAME_LEN] = {0};
+
+// buffer for output
+int16_t audio_buffer_filtered[AUDIO_FRAME_LEN] = { 0 };
+
+// mfcc features and their derivatives
+float mfcc_feature[NUM_FEATURES] = { 0 };
+float mfcc_feature_prev[NUM_FEATURES] = { 0 };
+float mfcc_feature_diff[NUM_FEATURES] = { 0 };
+float mfcc_feature_diff_prev[NUM_FEATURES] = { 0 };
+float mfcc_feature_diff1[NUM_FEATURES] = { 0 };
+
+// features for NN
+float nn_features[64] = {0};
+int8_t nn_features_q7[64] = {0};
+
+// NN results, which is the gains for each frequency band
+float band_gains[NUM_FILTER] = {0};
+float band_gains_prev[NUM_FILTER] = {0};
+
+// 0db gains coefficient
+float coeff_b[NUM_FILTER][NUM_COEFF_PAIR] = FILTER_COEFF_B;
+float coeff_a[NUM_FILTER][NUM_COEFF_PAIR] = FILTER_COEFF_A;
+
+// dynamic gains coefficient
+float b_[NUM_FILTER][NUM_COEFF_PAIR] = {0};
+
+// nnom model
+nnom_model_t *model;
+mfcc_t *mfcc;
+
+// -------------------
 
 float snr=1.;
 float snr0=0.;
@@ -110,7 +126,7 @@ gsl_matrix_complex *w_Intergral_val;
 gsl_matrix_complex *w_Previous_error;
 
 PaStream *audioStream;
-
+    
 gsl_complex double2complex(float re, float im){
     gsl_complex b;
     b.dat[0]=re;
@@ -270,6 +286,79 @@ void Compress_Mat(gsl_matrix_complex *matrix){
     }
 }
 
+// ---------------------------------------------------------
+// -----------------  rnn_denoise_function -----------------
+// ---------------------------------------------------------
+
+void y_h_update(float *y_h, uint32_t len)
+{
+	for (uint32_t i = len-1; i >0 ;i--)
+		y_h[i] = y_h[i-1];
+}
+
+//  equalizer by multiple n order iir band pass filter. 
+// y[i] = b[0] * x[i] + b[1] * x[i - 1] + b[2] * x[i - 2] - a[1] * y[i - 1] - a[2] * y[i - 2]...
+void equalizer(float* x, float* y, uint32_t signal_len, float *b, float *a, uint32_t num_band, uint32_t num_order)
+{
+	// the y history for each band
+	static float y_h[NUM_FILTER][NUM_COEFF_PAIR] = { 0 };
+	static float x_h[NUM_COEFF_PAIR * 2] = { 0 };
+	uint32_t num_coeff = num_order * 2 + 1;
+
+	// i <= num_coeff (where historical x is involved in the first few points)
+	// combine state and new data to get a continual x input. 
+	memcpy(x_h + num_coeff, x, num_coeff * sizeof(float));
+	for (uint32_t i = 0; i < num_coeff; i++)
+	{
+		y[i] = 0;
+		for (uint32_t n = 0; n < num_band; n++)
+		{
+			y_h_update(y_h[n], num_coeff);
+			y_h[n][0] = b[n * num_coeff] * x_h[i+ num_coeff];
+			for (uint32_t c = 1; c < num_coeff; c++)
+				y_h[n][0] += b[n * num_coeff + c] * x_h[num_coeff + i - c] - a[n * num_coeff + c] * y_h[n][c];
+			y[i] += y_h[n][0];
+		}
+	}
+	// store the x for the state of next round
+	memcpy(x_h, &x[signal_len - num_coeff], num_coeff * sizeof(float));
+	
+	// i > num_coeff; the rest data not involed the x history
+	for (uint32_t i = num_coeff; i < signal_len; i++)
+	{
+		y[i] = 0;
+		for (uint32_t n = 0; n < num_band; n++)
+		{
+			y_h_update(y_h[n], num_coeff);
+			y_h[n][0] = b[n * num_coeff] * x[i];
+			for (uint32_t c = 1; c < num_coeff; c++)
+				y_h[n][0] += b[n * num_coeff + c] * x[i - c] - a[n * num_coeff + c] * y_h[n][c];
+			y[i] += y_h[n][0];
+		}	
+	}
+}
+
+// set dynamic gains. Multiple gains x b_coeff
+void set_gains(float *b_in, float *b_out,  float* gains, uint32_t num_band, uint32_t num_order)
+{
+	uint32_t num_coeff = num_order * 2 + 1;
+	for (uint32_t i = 0; i < num_band; i++)
+		for (uint32_t c = 0; c < num_coeff; c++)
+			b_out[num_coeff *i + c] = b_in[num_coeff * i + c] * gains[i]; 
+}
+
+void quantize_data(float*din, int8_t *dout, uint32_t size, uint32_t int_bit)
+{
+	float limit = (1 << int_bit); 
+	for(uint32_t i=0; i<size; i++)
+		dout[i] = (int8_t)(_MAX(_MIN(din[i], limit), -limit) / limit * 127);
+}
+
+// ----------------------------------------------------------------
+// ----------------------------------------------------------------
+// ----------------------------------------------------------------
+
+
 
 int audio_callback(const void *inputBuffer,
                    void *outputBuffer, 
@@ -280,6 +369,7 @@ int audio_callback(const void *inputBuffer,
     
     float *in = (float*) inputBuffer, *out = (float*)outputBuffer;
     float y_arr_f_to_t_domain[FRAME_BLOCK_LEN];
+    float *y_arr_p = y_arr_f_to_t_domain;
     float *snr_p = &snr;
     float *snr0_p = &snr0;
     float *snr_Intergral_val_p = &snr_Intergral_val;
@@ -294,12 +384,12 @@ int audio_callback(const void *inputBuffer,
     float in_unsort[INPUT_CHANNEL][FRAME_BLOCK_LEN];
     float in_sort[USED_CH][FRAME_BLOCK_LEN];
     fftwf_complex input_fft_data[USED_CH][FRAME_BLOCK_LEN/2+1];
-    fftwf_plan plan;
     fftwf_complex output_fft_data[FRAME_BLOCK_LEN/2+1];
     float output[USED_CH][FRAME_BLOCK_LEN];
     int printmat=0;
     gsl_matrix_complex *fft_data_mat=gsl_matrix_complex_alloc(USED_CH, FRAME_BLOCK_LEN/2+1);
     gsl_matrix_complex *in_sort_mat=gsl_matrix_complex_alloc(USED_CH, FRAME_BLOCK_LEN);
+    int32_t *p_new_data;
     //printf("\n\n-----------start print------------\n");
     int ch_tag=0;
     int zero_count=0;
@@ -331,153 +421,109 @@ int audio_callback(const void *inputBuffer,
         }
         //printf("\n\n");
     }
-    for(int i=0;i<USED_CH;i++){
-        for(int j=0;j<FRAME_BLOCK_LEN;j++){
-            gsl_matrix_complex_set (in_sort_mat, i, j, double2complex(in_sort[i][j], 0.));
-        }
-        //printf("\n\n");
-    }
-    
-
-    //for(int i=0;i<USED_CH;i++){
-    //    for(int j=0;j<FRAME_BLOCK_LEN;j++){
-    //        printf("%f\t",in_sort[i][j]);
-    //    }
-    //    printf("\n\n");
-    //}
-
-
-    for(int i=0;i<USED_CH;i++){
-        //printf("\n");
-        plan = fftwf_plan_dft_r2c_1d(FRAME_BLOCK_LEN, in_sort[i], input_fft_data[i], FFTW_ESTIMATE);
-        fftwf_execute(plan);
-
-
-        //gsl_fft_complex_radix2_forward(input_fft_data[i], 1, FRAME_BLOCK_LEN);
-        for(int k=0;k<FRAME_BLOCK_LEN/2+1;k++){
-            gsl_matrix_complex_set (fft_data_mat, i, k, double2complex(input_fft_data[i][k][0], input_fft_data[i][k][1]));
-        }
-    }
-    
-    //for(int i=0;i<FRAME_BLOCK_LEN;i++){
-    //    printf("%f\t",input_fft_data[4][i][0]);
-    //}
-    //printf("\n");
-    
-    //PrintMat(fft_data_mat,"---");
-    //-------Processing in f domain-------
-    gsl_matrix_complex *Rxx=gsl_matrix_complex_alloc(fft_data_mat->size1, fft_data_mat->size1);
-    gsl_matrix_complex *invR=gsl_matrix_complex_alloc(fft_data_mat->size1, fft_data_mat->size1);
-    gsl_matrix_complex *AA=gsl_matrix_complex_alloc(1,USED_CH);
-    gsl_matrix_complex *bestAA=gsl_matrix_complex_alloc(1,USED_CH);
-    gsl_matrix_complex *tempww=gsl_matrix_complex_alloc(1,USED_CH);
-    gsl_matrix_complex *ww=gsl_matrix_complex_alloc(1,1);
-    gsl_matrix_complex *bestww=gsl_matrix_complex_alloc(1,1);
-    gsl_matrix_complex *w=gsl_matrix_complex_alloc(USED_CH,1);
-    gsl_matrix_complex *y=gsl_matrix_complex_alloc(1, FRAME_BLOCK_LEN);
-    gsl_matrix_complex_set_zero(y);
-    double max_ww=-1;
-    autocorr(Rxx,fft_data_mat);
-    invMat(Rxx,invR);
-    Compress_Mat(invR);
-    //PrintMat(invR,"INVR");
-    //abort();
-    for(int idoa=0; idoa<360; idoa+=5){
-        for(int i=0;i<USED_CH;i++){
-            float tempaa = (float) (sin(M_PI/2)*cos(DEG2RAD((double)idoa)-2*i*M_PI/USED_CH));
-            gsl_matrix_complex_set (AA, 0, i, eulers_formula(-1*2*M_PI*Radii*tempaa/(LDA)));
-        }
-        gsl_blas_zgemm(CblasNoTrans, CblasNoTrans, double2complex(1.,0.), AA, invR, double2complex(0.,0.), tempww);
-        gsl_blas_zgemm(CblasNoTrans, CblasConjTrans, double2complex(1.,0.), tempww, AA, double2complex(0.,0.), ww);
-        //gsl_matrix_complex_set(ww,0,0,double2complex(
-        //        Compress(gsl_matrix_complex_get(ww,0,0).dat[0]),    //Compress the gain of ww
-        //        gsl_matrix_complex_get(ww,0,0).dat[1]));
-        //printf("%f\t%f\n",gsl_complex_div(double2complex(1.,0.),gsl_matrix_complex_get(ww,0,0)));
-        //PrintMat(ww,"ww");
-        if(gsl_matrix_complex_get(ww,0,0).dat[0]>max_ww){
-            *doa_p=idoa;
-            max_ww=gsl_matrix_complex_get(ww,0,0).dat[0];
-            gsl_matrix_complex_memcpy(bestww,ww);
-            //gsl_matrix_complex_memcpy(bestAA,AA);
-        }
-    }
-
-    //*doa_p=PID(*doa_p,*doa0_p,0.1,0,0,*doa_Intergral_val_p,*doa_Previous_error_p);
-    *doa_p = EMA(*doa_p, *doa0_p, 0.1);
-    *doa0_p=*doa_p;
-    // *doa_p=0;
-    //for(int i=0;i<*doa_p/5;i++){
-    //    printf(" ");
-    //}
-    //printf("|\n");
-
-
-    for(int l=600; l<100*BANDCOUNT; l+=100){    //Wide band
-        for(int i=0;i<USED_CH;i++){
-                float tempaa = (float) (sin(M_PI/2)*cos(DEG2RAD((double)*doa_p)-2*i*M_PI/USED_CH));
-                gsl_matrix_complex_set (bestAA, 0, i, eulers_formula(-1*2*M_PI*Radii*tempaa/(TEMPERATURE/l)));
-        }
-
-        gsl_blas_zgemm(CblasNoTrans, CblasConjTrans, gsl_complex_div(double2complex(1.,0.),gsl_matrix_complex_get(bestww,0,0)), invR, bestAA, double2complex(0.,0.), w);
-        gsl_blas_zgemm(CblasConjTrans, CblasNoTrans, double2complex(GAIN*(*snr_p)/(float)BANDCOUNT,0.), w, in_sort_mat, double2complex(1./(float)BANDCOUNT,0.), y);
-        // gsl_blas_zgemm(CblasConjTrans, CblasNoTrans, double2complex(GAIN/(float)BANDCOUNT,0.), w, in_sort_mat, double2complex(1./(float)BANDCOUNT,0.), y);
-        
-    }
-    //PrintMat(y,"y");
-    for(int i=0;i<FRAME_BLOCK_LEN;i++){
-        //y_arr_f_to_t_domain[i] = (float) gsl_complex_abs(gsl_matrix_complex_get(y,0,i));
-        y_arr_f_to_t_domain[i] = (float) gsl_matrix_complex_get(y,0,i).dat[0];
-        //printf("%f\t",y_arr_f_to_t_domain[i]);
-    }
-    //printf("%f\t",y_arr_f_to_t_domain[0]);
-    //printf("%f\n",*snr_p);
     float original[FRAME_BLOCK_LEN];  // original audio using complex form
     float *p_original=original;
-    float *y_arr_p = y_arr_f_to_t_domain;
 
     for(int i=0;i<FRAME_BLOCK_LEN;i++){
-        //float tmp=0;
-        //for(int j=0;j<USED_CH;j++){
-        //    tmp+=(in_sort[j][i]/6);
-        //    //tmp+=output[j][i];
-        //}
-        //original[i]=tmp;
+        float tmp=0;
+        for(int j=0;j<USED_CH;j++){
+            tmp+=(in_sort[j][i]/USED_CH);
+            //tmp+=output[j][i];
+        }
+        original[i]=tmp;
         //*out++ = *p_original++;
-        *out++ = *y_arr_p++;
+        //*out++ = *y_arr_p++;
         //*y_arr_p++;
     }
-    //-------------------- RNN Denoise --------------------
+
+    // -------------------------------------------
+    // --------------- rnn denoise ---------------
+    // -------------------------------------------
 
 
 
+    // memcpy(audio_buffer_16bit, &audio_buffer_16bit[AUDIO_FRAME_LEN/2], AUDIO_FRAME_LEN/2*sizeof(int16_t));
+
+    for(int i = 0; i < AUDIO_FRAME_LEN; i++){
+        audio_buffer_16bit[i] = (int16_t)SaturaLH((original[i] * 32768.f * RNN_GAIN_IN), -32768.f, 32767.f);
+    }
 
 
-
-    //-------------------- SNR Estimation --------------------
-    plan = fftwf_plan_dft_r2c_1d(FRAME_BLOCK_LEN, y_arr_f_to_t_domain, output_fft_data, FFTW_ESTIMATE);
-    fftwf_execute(plan);
-    *snr_p = SNR(output_fft_data, 600, 10.);
-    //printf("%f\n",*snr_p);
-    // *snr_p = PID(*snr_p,*snr0_p, 0.001, 0, 0, *snr_Intergral_val_p, *snr_Previous_error_p);
-    *snr_p = EMA(*snr_p,*snr0_p, 0.01);
-    *snr0_p = *snr_p;
+    // get mfcc
+    mfcc_compute(mfcc, audio_buffer_16bit, mfcc_feature);
     
-    // printf("%f\n",*snr_p);
-    //gsl_fft_complex_radix2_inverse(y_arr_f_to_t_domain, 1, FRAME_BLOCK_LEN);
+    // get the first and second derivative of mfcc
+    for(uint32_t i=0; i< NUM_FEATURES; i++){
+        mfcc_feature_diff[i] = mfcc_feature[i] - mfcc_feature_prev[i];
+        mfcc_feature_diff1[i] = mfcc_feature_diff[i] - mfcc_feature_diff_prev[i];
+    }
+    memcpy(mfcc_feature_prev, mfcc_feature, NUM_FEATURES * sizeof(float));
+    memcpy(mfcc_feature_diff_prev, mfcc_feature_diff, NUM_FEATURES * sizeof(float));
+    
+    // combine MFCC with derivatives for the NN features
+    memcpy(nn_features, mfcc_feature, NUM_FEATURES*sizeof(float));
+    memcpy(&nn_features[NUM_FEATURES], mfcc_feature_diff, 10*sizeof(float));
+    memcpy(&nn_features[NUM_FEATURES+10], mfcc_feature_diff1, 10*sizeof(float));
 
-    //Free these all Fucking things
-    gsl_matrix_complex_free(Rxx);
-    gsl_matrix_complex_free(invR);
-    gsl_matrix_complex_free(AA);
-    gsl_matrix_complex_free(tempww);
-    gsl_matrix_complex_free(ww);
-    gsl_matrix_complex_free(w);
-    gsl_matrix_complex_free(y);
+    // quantise them using the same scale as training data (in keras), by 2^n. 
+    quantize_data(nn_features, nn_features_q7, NUM_FEATURES+20, 3);
+    
+    // run the mode with the new input
+    memcpy(nnom_input_data, nn_features_q7, sizeof(nnom_input_data));
+    model_run(model);
+
+    // read the result, convert it back to float (q0.7 to float)
+    for(int i=0; i< NUM_FEATURES; i++)
+        band_gains[i] = (float)(nnom_output_data[i]) / 127.f;
+    
+    // one more step, limit the change of gians, to smooth the speech, per RNNoise paper
+    for(int i=0; i< NUM_FEATURES; i++)
+        band_gains[i] = _MAX(band_gains_prev[i]*0.8f, band_gains[i]); 
+    memcpy(band_gains_prev, band_gains, NUM_FEATURES *sizeof(float));
+    
+    // update filter coefficient to applied dynamic gains to each frequency band 
+    set_gains((float*)coeff_b, (float*)b_, band_gains, NUM_FILTER, NUM_ORDER);
+
+    // convert 16bit to float for equalizer
+    for (int i = 0; i < AUDIO_FRAME_LEN; i++)
+        audio_buffer[i] = audio_buffer_16bit[i] / 32768.f;
+            
+    // finally, we apply the equalizer to this audio frame to denoise
+    equalizer(audio_buffer, &audio_buffer[AUDIO_FRAME_LEN], AUDIO_FRAME_LEN, (float*)b_,(float*)coeff_a, NUM_FILTER, NUM_ORDER);
+    
+    // convert it back to int16
+    for (int i = 0; i < AUDIO_FRAME_LEN; i++)
+        audio_buffer_filtered[i] = audio_buffer[i] * 32768.f *0.7f; // 0.7 is the filter band overlapping factor
+
+
+    
+    float audio_buffer_filtered_float[FRAME_BLOCK_LEN];
+    float *p_audio_buffer_filtered_float=audio_buffer_filtered_float;
+
+    for(int i=0;i<FRAME_BLOCK_LEN;i++){
+        audio_buffer_filtered_float[i] = (float)audio_buffer_filtered[i];
+        audio_buffer_filtered_float[i] /= 32768.f;
+        audio_buffer_filtered_float[i] *= RNN_GAIN_OUT;
+        *out++ = *p_audio_buffer_filtered_float++;
+        // *out++ = *p_original++;
+        //*out++ = *y_arr_p++;
+        //*y_arr_p++;
+    }
+    // if(nnom_output_data1[0] >= 64)
+    //     printf("speech\n");
+    // else
+    //     printf("noise\n");
+
+
+
+    // ------------------------------------------------
+    // ------------------------------------------------
+    // ------------------------------------------------
+
+
+
     gsl_matrix_complex_free(fft_data_mat);
     gsl_matrix_complex_free(in_sort_mat);
-    gsl_matrix_complex_free(bestww);
-    gsl_matrix_complex_free(bestAA);
-    fftwf_destroy_plan(plan);
 
     return paContinue;
 }
@@ -531,6 +577,10 @@ void init_stuff(){
     Pa_StartStream(audioStream); /* start the callback mechanism */
     printf("running. . . press space bar and enter to exit\n");
     printf("Latency: %f\n",info->defaultLowInputLatency);
+    printf("load model\n");
+    model = nnom_model_create();
+    mfcc = mfcc_create(NUM_FEATURES, 0, NUM_FEATURES, 512, 0, true);
+    printf("model loaded\n");
 }
 
 void terminate_stuff(){
