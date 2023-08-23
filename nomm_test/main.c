@@ -35,8 +35,8 @@ If use fftwf:
 #define IMAG(z,i) ((z)[2*(i)+1])
 #define DEG2RAD(x) (x*M_PI/180)
 
-#define FRAME_BLOCK_LEN 1024
-#define SAMPLING_RATE 44100
+#define FRAME_BLOCK_LEN 512
+#define SAMPLING_RATE 16000
 #define INPUT_CHANNEL 8
 #define USED_CH 6
 #define OUTPUT_CHANNEL 1
@@ -70,8 +70,8 @@ If use fftwf:
 #define _MIN(x, y) (((x) < (y)) ? (x) : (y))
 #define SaturaLH(N, L, H) (((N)<(L))?(L):(((N)>(H))?(H):(N)))
 
-#define RNN_GAIN_IN     5.0f
-#define RNN_GAIN_OUT    0.5f
+#define RNN_GAIN_IN     10.0f
+#define RNN_GAIN_OUT    5.f
 #define NUM_CHANNELS 	1
 #define SAMPLE_RATE 	SAMPLING_RATE
 #define AUDIO_FRAME_LEN FRAME_BLOCK_LEN
@@ -389,7 +389,7 @@ int audio_callback(const void *inputBuffer,
     int printmat=0;
     gsl_matrix_complex *fft_data_mat=gsl_matrix_complex_alloc(USED_CH, FRAME_BLOCK_LEN/2+1);
     gsl_matrix_complex *in_sort_mat=gsl_matrix_complex_alloc(USED_CH, FRAME_BLOCK_LEN);
-    int32_t *p_new_data;
+    float *p_new_data;
     //printf("\n\n-----------start print------------\n");
     int ch_tag=0;
     int zero_count=0;
@@ -441,61 +441,70 @@ int audio_callback(const void *inputBuffer,
     // -------------------------------------------
 
 
+    for (int iw =0; iw<2; iw++){
 
-    // memcpy(audio_buffer_16bit, &audio_buffer_16bit[AUDIO_FRAME_LEN/2], AUDIO_FRAME_LEN/2*sizeof(int16_t));
+        memcpy(audio_buffer_16bit, &audio_buffer_16bit[AUDIO_FRAME_LEN/2], AUDIO_FRAME_LEN/2*sizeof(int16_t));
+        
+        // banchmarking
+        //printf("mfcc:%dus, nn:%dus, EQ:%dus, total:%dus\n", mfcc_time, nn_time, equalizer_time, us_timer_get()-start_time);
+        if(iw==0){
+			p_new_data = p_original;
+		}
+		else{
+			p_new_data = &p_original[AUDIO_FRAME_LEN/2];
+		}
+        // convert the file to 16bit.
+        for(int i = 0; i < AUDIO_FRAME_LEN/2; i++)
+            audio_buffer_16bit[AUDIO_FRAME_LEN/2+i] = (int16_t)SaturaLH((p_new_data[i] * 32768.f), -32768, 32767);
+        
+        // get mfcc
+        mfcc_compute(mfcc, audio_buffer_16bit, mfcc_feature);
 
-    for(int i = 0; i < AUDIO_FRAME_LEN; i++){
-        audio_buffer_16bit[i] = (int16_t)SaturaLH((original[i] * 32768.f * RNN_GAIN_IN), -32768.f, 32767.f);
+        // get the first and second derivative of mfcc
+        for(uint32_t i=0; i< NUM_FEATURES; i++)
+        {
+            mfcc_feature_diff[i] = mfcc_feature[i] - mfcc_feature_prev[i];
+            mfcc_feature_diff1[i] = mfcc_feature_diff[i] - mfcc_feature_diff_prev[i];
+        }
+        memcpy(mfcc_feature_prev, mfcc_feature, NUM_FEATURES * sizeof(float));
+        memcpy(mfcc_feature_diff_prev, mfcc_feature_diff, NUM_FEATURES * sizeof(float));
+        
+        // combine MFCC with derivatives for the NN features
+        memcpy(nn_features, mfcc_feature, NUM_FEATURES*sizeof(float));
+        memcpy(&nn_features[NUM_FEATURES], mfcc_feature_diff, 10*sizeof(float));
+        memcpy(&nn_features[NUM_FEATURES+10], mfcc_feature_diff1, 10*sizeof(float));
+
+        // quantise them using the same scale as training data (in keras), by 2^n. 
+        quantize_data(nn_features, nn_features_q7, NUM_FEATURES+20, 3);
+        
+        // run the mode with the new input
+        memcpy(nnom_input_data, nn_features_q7, sizeof(nnom_input_data));
+        model_run(model);
+
+        // read the result, convert it back to float (q0.7 to float)
+        for(int i=0; i< NUM_FEATURES; i++)
+            band_gains[i] = (float)(nnom_output_data[i]) / 127.f;
+        
+        // one more step, limit the change of gians, to smooth the speech, per RNNoise paper
+        for(int i=0; i< NUM_FEATURES; i++)
+            band_gains[i] = _MAX(band_gains_prev[i]*0.8f, band_gains[i]); 
+        memcpy(band_gains_prev, band_gains, NUM_FEATURES *sizeof(float));
+        
+        // update filter coefficient to applied dynamic gains to each frequency band 
+        set_gains((float*)coeff_b, (float*)b_, band_gains, NUM_FILTER, NUM_ORDER);
+
+        // convert 16bit to float for equalizer
+        for (int i = 0; i < AUDIO_FRAME_LEN/2; i++)
+            audio_buffer[i] = audio_buffer_16bit[i + AUDIO_FRAME_LEN / 2] / 32768.f;
+                
+        // finally, we apply the equalizer to this audio frame to denoise
+        equalizer(audio_buffer, &audio_buffer[AUDIO_FRAME_LEN / 2], AUDIO_FRAME_LEN/2, (float*)b_,(float*)coeff_a, NUM_FILTER, NUM_ORDER);
+        
+        // convert it back to int16
+        int iter = iw * AUDIO_FRAME_LEN / 2;
+        for (int i = 0; i < AUDIO_FRAME_LEN / 2; i++)
+            audio_buffer_filtered[i+iter] = audio_buffer[i + AUDIO_FRAME_LEN / 2] * 32768.f *0.6f; // 0.7 is the filter band overlapping factor
     }
-
-
-    // get mfcc
-    mfcc_compute(mfcc, audio_buffer_16bit, mfcc_feature);
-    
-    // get the first and second derivative of mfcc
-    for(uint32_t i=0; i< NUM_FEATURES; i++){
-        mfcc_feature_diff[i] = mfcc_feature[i] - mfcc_feature_prev[i];
-        mfcc_feature_diff1[i] = mfcc_feature_diff[i] - mfcc_feature_diff_prev[i];
-    }
-    memcpy(mfcc_feature_prev, mfcc_feature, NUM_FEATURES * sizeof(float));
-    memcpy(mfcc_feature_diff_prev, mfcc_feature_diff, NUM_FEATURES * sizeof(float));
-    
-    // combine MFCC with derivatives for the NN features
-    memcpy(nn_features, mfcc_feature, NUM_FEATURES*sizeof(float));
-    memcpy(&nn_features[NUM_FEATURES], mfcc_feature_diff, 10*sizeof(float));
-    memcpy(&nn_features[NUM_FEATURES+10], mfcc_feature_diff1, 10*sizeof(float));
-
-    // quantise them using the same scale as training data (in keras), by 2^n. 
-    quantize_data(nn_features, nn_features_q7, NUM_FEATURES+20, 3);
-    
-    // run the mode with the new input
-    memcpy(nnom_input_data, nn_features_q7, sizeof(nnom_input_data));
-    model_run(model);
-
-    // read the result, convert it back to float (q0.7 to float)
-    for(int i=0; i< NUM_FEATURES; i++)
-        band_gains[i] = (float)(nnom_output_data[i]) / 127.f;
-    
-    // one more step, limit the change of gians, to smooth the speech, per RNNoise paper
-    for(int i=0; i< NUM_FEATURES; i++)
-        band_gains[i] = _MAX(band_gains_prev[i]*0.8f, band_gains[i]); 
-    memcpy(band_gains_prev, band_gains, NUM_FEATURES *sizeof(float));
-    
-    // update filter coefficient to applied dynamic gains to each frequency band 
-    set_gains((float*)coeff_b, (float*)b_, band_gains, NUM_FILTER, NUM_ORDER);
-
-    // convert 16bit to float for equalizer
-    for (int i = 0; i < AUDIO_FRAME_LEN; i++)
-        audio_buffer[i] = audio_buffer_16bit[i] / 32768.f;
-            
-    // finally, we apply the equalizer to this audio frame to denoise
-    equalizer(audio_buffer, &audio_buffer[AUDIO_FRAME_LEN], AUDIO_FRAME_LEN, (float*)b_,(float*)coeff_a, NUM_FILTER, NUM_ORDER);
-    
-    // convert it back to int16
-    for (int i = 0; i < AUDIO_FRAME_LEN; i++)
-        audio_buffer_filtered[i] = audio_buffer[i] * 32768.f *0.7f; // 0.7 is the filter band overlapping factor
-
-
     
     float audio_buffer_filtered_float[FRAME_BLOCK_LEN];
     float *p_audio_buffer_filtered_float=audio_buffer_filtered_float;
@@ -505,7 +514,7 @@ int audio_callback(const void *inputBuffer,
         audio_buffer_filtered_float[i] /= 32768.f;
         audio_buffer_filtered_float[i] *= RNN_GAIN_OUT;
         *out++ = *p_audio_buffer_filtered_float++;
-        // *out++ = *p_original++;
+        //*out++ = *p_original++;
         //*out++ = *y_arr_p++;
         //*y_arr_p++;
     }

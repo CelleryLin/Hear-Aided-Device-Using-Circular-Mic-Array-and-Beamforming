@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "bf.h": "c",
+        "rtwtypes.h": "c",
+        "only_bf_types.h": "c",
+        "only_bf_terminate.h": "c"
+    }
+}

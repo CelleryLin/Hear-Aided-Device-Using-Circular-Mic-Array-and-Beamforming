@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "portaudio.h": "c",
+        "array": "c",
+        "string_view": "c",
+        "only_bf_internal_types.h": "c"
+    }
+}
